@@ -1,0 +1,616 @@
+---
+title: "DASC6510 Time Series Course Final Project"
+author: "Changda Li (T00705321) & Duo Feng (T00704552)"
+date: "2023-11-30"
+output: pdf_document
+---
+
+# 0. Laoding libaries and dataset
+```{r}
+library(fable)
+library(fabletools)
+library(fpp3)
+library(dplyr)
+library(tsibble)
+library(readxl)
+library(forecast)
+library(tsintermittent)
+library(expsmooth)
+library(fable.prophet)
+library(ggplot2)
+library(pheatmap)
+library(imputeTS)
+```
+
+```{r}
+setwd("./")
+data_train <- read.csv("data/DailyDelhiClimateTrain.csv")
+data_test <- read.csv("data/DailyDelhiClimateTest.csv")
+```
+
+# I. Exploratory data analysis
+## 1. Distribution of the each variable
+```{r}
+# Plot the distribution of each variable
+ggplot(data_train, aes(x = meantemp)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "black") +
+  labs(title = "Distribution of Mean Temperature", x = "Mean Temperature", y = "Frequency")
+
+ggplot(data_train, aes(x = humidity)) +
+  geom_histogram(binwidth = 5, fill = "green", color = "black") +
+  labs(title = "Distribution of Humidity", x = "Humidity", y = "Frequency")
+
+ggplot(data_train, aes(x = wind_speed)) +
+  geom_histogram(binwidth = 1, fill = "red", color = "black") +
+  labs(title = "Distribution of Wind Speed", x = "Wind Speed", y = "Frequency")
+
+ggplot(data_train, aes(x = meanpressure)) +
+  geom_histogram(binwidth = 1, fill = "purple", color = "black") +
+  labs(title = "Distribution of Mean Pressure", x = "Mean Pressure", y = "Frequency")
+```
+
+## 2. Boxplot of the each variable
+```{r}
+# Create a box plot for mean temperature
+ggplot(data_train, aes(y = meantemp)) +
+  geom_boxplot(fill = "blue") +
+  labs(title = "Box Plot of Mean Temperature", y = "Mean Temperature")
+
+# Create a box plot for humidity
+ggplot(data_train, aes(y = humidity)) +
+  geom_boxplot(fill = "green") +
+  labs(title = "Box Plot of Humidity", y = "Humidity")
+
+# Create a box plot for wind speed
+ggplot(data_train, aes(y = wind_speed)) +
+  geom_boxplot(fill = "red") +
+  labs(title = "Box Plot of Wind Speed", y = "Wind Speed")
+
+# Create a box plot for mean pressure
+ggplot(data_train, aes(y = meanpressure)) +
+  geom_boxplot(fill = "purple") +
+  labs(title = "Box Plot of Mean Pressure", y = "Mean Pressure")
+```
+
+## 3. Find the outlier of mean pressure:
+```{r}
+q1_meanpressure <- quantile(data_train$meanpressure, 0.25)
+q3_meanpressure <- quantile(data_train$meanpressure, 0.75)
+iqr_meanpressure <- q3_meanpressure - q1_meanpressure
+lower_bound_meanpressure <- q1_meanpressure - 1.5 * iqr_meanpressure
+upper_bound_meanpressure <- q3_meanpressure + 1.5 * iqr_meanpressure
+outliers_meanpressure <- data_train$meanpressure[data_train$meanpressure < lower_bound_meanpressure | data_train$meanpressure > upper_bound_meanpressure]
+outliers_meanpressure 
+```
+We can see that there is a extreme large value of meanpressure, so we need to drop it because it is not reasonable.
+
+## 4. Drop the outlier the outlier of mean pressure:
+```{r}
+outlier_row_num <- which(data_train$meanpressure > 7000)
+data_train_no_outlier <- data_train[-outlier_row_num, ]
+```
+
+## 5. Chekc missing values
+```{r}
+sum(is.na(data_train_no_outlier))
+```
+There is no missing values in the data set.
+
+## 6. Heat map
+```{r}
+pheatmap(cor(data_train_no_outlier[,-1]),cluster_rows = FALSE, cluster_cols =FALSE)
+```
+
+
+## 7. Transform the data to tsibble
+```{r}
+data_train_no_outlier <- data_train_no_outlier[-nrow(data_train_no_outlier), ]
+
+train_ts <- tsibble(
+  Date = as.Date(data_train_no_outlier$date),
+  #Day_number = 1:length(data_train_no_outlier$date),
+  Mean_temp = data_train_no_outlier$meantemp,
+  Humidity = data_train_no_outlier$humidity,
+  Wind_speed = data_train_no_outlier$wind_speed,
+  Mean_pressure = data_train_no_outlier$meanpressure,
+  index = Date
+)
+
+test_ts <- tsibble(
+  Date = as.Date(data_test$date),
+  #Day_number = (length(data_train_no_outlier$date)+1):(length(data_test$date) + 
+    #length(data_train_no_outlier$date)),
+  Mean_temp = data_test$meantemp,
+  Humidity = data_test$humidity,
+  Wind_speed = data_test$wind_speed,
+  Mean_pressure = data_test$meanpressure,
+  index = Date
+)
+```
+
+## 8. Plot the meantemp
+```{r}
+train_ts %>% 
+  autoplot(Mean_temp) +
+  labs(
+    x = "Date", 
+    y = "Mean Temperature",
+    title = "Time Series of Mean Temperature"
+  )
+```
+We can see that plot shows a strong cycle.
+
+## 9. Decompose the time series of meantemp
+Because there is a gap in the train data set, we need to fill the gap and impute the missing values
+```{r}
+train_ts_fill_gap <- train_ts %>% fill_gaps()
+missing_row_num <- which(is.na(train_ts_fill_gap["Mean_temp"]))
+
+train_ts_fill_gap[missing_row_num,]$Mean_temp <-
+  data_train[missing_row_num,]$meantemp
+train_ts_fill_gap[missing_row_num,]$Humidity <-
+  data_train[missing_row_num,]$humidity
+train_ts_fill_gap[missing_row_num,]$Wind_speed <-
+  data_train[missing_row_num,]$wind_speed
+
+pressure_imputed <- train_ts_fill_gap %>%
+  model(
+    ARIMA(Mean_pressure)
+    ) %>% interpolate(train_ts_fill_gap)
+pressure_imputed[missing_row_num,]
+
+train_ts_fill_gap[missing_row_num,]$Mean_pressure <-
+  pressure_imputed[missing_row_num,]$Mean_pressure
+
+train_ts_imputed <- train_ts_fill_gap
+```
+Redo the train test split, assign more number of rows to the test set
+```{r}
+data_whole <-  bind_rows(train_ts_imputed, test_ts)
+train_ts_imputed <- data_whole %>% filter(Date <= "2016-10-30")
+test_ts <- data_whole %>% filter(Date > "2016-10-30")
+```
+
+```{r}
+dcmp_train <- train_ts_imputed %>%
+  model(stl = STL(Mean_temp))
+components(dcmp_train)
+```
+
+```{r}
+components(dcmp_train) %>%
+  autoplot
+```
+```{r}
+train_ts_imputed %>% 
+  autoplot(Mean_temp) +
+  autolayer(components(dcmp_train), trend, color='red')
+  labs(
+    x = "Date", 
+    y = "Mean Temperature",
+    title = "Time Series of Mean Temperature"
+  )
+```
+
+
+# II. Training model
+## 1. TSLM
+```{r}
+fit_lm <- train_ts_imputed %>%
+  model(
+    tslm = TSLM(Mean_temp ~ Mean_pressure + Wind_speed + Humidity)
+  )
+report(fit_lm)
+```
+Residual:
+```{r}
+gg_tsresiduals(fit_lm)
+```
+We can see there is an obvious pattern in the residual plot, and the acf plot shows strong autocorrelation between observations. The distribution is also not normally distributed. In other words, there are some useful information left in the residuals.
+
+## 2. Benchmark methods(Mean, Naive, Seanonal Naive)
+### Mean method:
+```{r}
+fit_mean <- train_ts_imputed %>%
+  model(
+    mean = MEAN(Mean_temp)
+  )
+```
+Residuals:
+```{r}
+gg_tsresiduals(fit_mean)
+```
+Similar to TSLM.\
+
+### NAIVE method:
+```{r}
+fit_naive <- train_ts_imputed %>%
+  model(
+    naive = NAIVE(Mean_temp)
+  )
+```
+
+Residuals:
+```{r}
+gg_tsresiduals(fit_naive)
+```
+Better than mean method, let's the result of Ljung-Box test:
+```{r}
+augment(fit_naive) %>%
+  features(.resid, ljung_box, lag=10, dof=0)
+```
+We got an extreme small p-value, so the residuals are not white noise.\
+
+
+### Snaive method:
+```{r}
+fit_snaive <- train_ts_imputed %>%
+  model(
+    snaive = SNAIVE(Mean_temp)
+  )
+```
+
+Residuals:
+```{r}
+gg_tsresiduals(fit_snaive)
+```
+
+### Drift method:
+```{r}
+fit_drift <- train_ts_imputed %>%
+  model(
+    drift = NAIVE(Mean_temp ~ drift())
+  )
+```
+Residual:
+```{r}
+gg_tsresiduals(fit_drift)
+```
+Similar to naive
+
+## 3. ARIMA
+### With a constant
+```{r}
+fit_arima <- train_ts_imputed %>%
+  model(
+    arima = ARIMA(Mean_temp ~ 1 + pdq() + PDQ(), stepwise=FALSE,approx=FALSE)
+  )
+report(fit_arima)
+```
+Residuals:
+```{r}
+gg_tsresiduals(fit_arima)
+```
+Seems good, let's see the Ljung-box test:
+```{r}
+augment(fit_arima) %>%
+  features(.resid, ljung_box, lag=10, dof=4)
+```
+The p-value not large but greater than 0.05, so the residuals are dishtinguishable for white noise.\
+
+### Without a constant
+```{r}
+fit_arima_no_cons <- train_ts_imputed %>%
+  model(
+    arima_no_cons = ARIMA(Mean_temp ~ pdq() + PDQ(), 
+                          stepwise=FALSE, approx=FALSE)
+  )
+report(fit_arima_no_cons )
+```
+Residuals:
+```{r}
+gg_tsresiduals(fit_arima_no_cons)
+```
+Also seems good, let's see the Ljung-box test:
+```{r}
+augment(fit_arima_no_cons) %>%
+  features(.resid, ljung_box, lag=10, dof=4)
+```
+Similar to the ARIMA with a constant.
+
+## 4.EWMA
+```{r}
+fit_ewma <- train_ts_imputed |>
+  model(ewma = ETS(Mean_temp))
+gg_tsresiduals(fit_ewma)
+```
+
+Check white noise by ljung box:
+
+```{r}
+augment(fit_ewma) %>%
+  features(.resid, ljung_box, lag=10, dof=0)
+```
+
+The Ha is rejected by low p-value, thus the residual of EWMA model is not white noise here.
+
+## 5.Dynamic regression
+```{r}
+fit_darima <- train_ts_imputed%>%
+  model(
+    dynamic_arima = ARIMA(Mean_temp ~ Mean_pressure + Humidity + Wind_speed)
+  )
+report(fit_darima)
+```
+
+Residuals:
+```{r}
+gg_tsresiduals(fit_darima, type = 'innovation')
+```
+Ljung-box:
+```{r}
+augment(fit_darima) %>%
+  features(.resid, ljung_box, lag=10, dof=7)
+```
+
+### Arima error with differnece is 0
+```{r}
+fit_darima_diff0 <- train_ts_imputed %>%
+  model(
+    dynamic_arima_diff0 = ARIMA(Mean_temp ~ Mean_pressure + Humidity + Wind_speed +
+                        pdq(d = 0) + PDQ())
+  )
+report(fit_darima_diff0)
+```
+
+```{r}
+gg_tsresiduals(fit_darima_diff0)
+```
+Ljung-box:
+```{r}
+augment(fit_darima_diff0) %>%
+  features(.resid, ljung_box, lag=10, dof=5)
+```
+
+The residual is neither white noise.
+
+## 6. NNAR
+```{r}
+fit_nnar <- train_ts_imputed %>%
+  model(
+    nnar = NNETAR(Mean_temp)
+  )
+report(fit_nnar)
+```
+
+Residuals:
+```{r}
+gg_tsresiduals(fit_nnar)
+```
+
+ljung-box:
+```{r}
+augment(fit_nnar) %>%
+  features(.resid, ljung_box, lag=10, dof=0)
+```
+
+## 7. Propht
+```{r}
+fit_prophet <- train_ts_imputed %>% 
+  model(
+    prophet = prophet(Mean_temp ~ Mean_pressure 
+                      + Humidity + Wind_speed 
+                      + season(period = "week", order = 10) 
+                      + season(period = "year", order = 5)) 
+  )
+```
+
+Residuals:
+```{r}
+gg_tsresiduals(fit_prophet)
+```
+
+# III. Evaluation of the models
+## 1. TSLM
+```{r}
+tslm_forecast <- fit_lm %>% forecast(test_ts)
+tslm_acc <- fabletools::accuracy(tslm_forecast, test_ts)
+tslm_acc
+
+# combine train and test tsibble
+combined_tsibble <- bind_rows(train_ts_imputed, test_ts)
+tslm_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 2. Benckmark
+### Mean
+```{r}
+mean_forecast <- fit_mean %>% forecast(test_ts)
+mean_acc <- fabletools::accuracy(mean_forecast, test_ts)
+mean_acc
+
+mean_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+### NAIVE
+```{r}
+naive_forecast <- fit_naive %>% forecast(test_ts)
+naive_acc <- fabletools::accuracy(naive_forecast, test_ts)
+naive_acc
+
+naive_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+### SNaive
+```{r}
+snaive_forecast <- fit_snaive %>% forecast(test_ts)
+snaive_acc <- fabletools::accuracy(snaive_forecast, test_ts)
+snaive_acc
+
+snaive_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+
+### Drift
+```{r}
+drift_forecast <- fit_drift %>% forecast(test_ts)
+drift_acc <- fabletools::accuracy(drift_forecast, test_ts)
+drift_acc
+
+drift_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 3. ARIMA
+### With a constant
+```{r}
+arima_forecast <- fit_arima %>% forecast(test_ts)
+arima_acc <- fabletools::accuracy(arima_forecast, test_ts)
+arima_acc
+
+arima_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+### without a constant
+```{r}
+arima_no_cons_forecast <- fit_arima_no_cons %>% forecast(test_ts)
+arima_no_cons_acc <- fabletools::accuracy(arima_no_cons_forecast, test_ts)
+arima_no_cons_acc
+
+arima_no_cons_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 4. EWMA
+```{r}
+ewma_forecast <- fit_ewma %>% forecast(test_ts)
+ewma_acc <- fabletools::accuracy(ewma_forecast, test_ts)
+ewma_acc 
+
+ewma_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 5. Dynamic regression
+```{r}
+darima_forecast <- fit_darima %>% forecast(test_ts)
+darima_acc <- fabletools::accuracy(darima_forecast, test_ts)
+darima_acc 
+
+darima_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+### Arima error with difference 0
+```{r}
+darima_diff0_forecast <- fit_darima_diff0 %>% forecast(test_ts)
+darima_diff0_acc <- fabletools::accuracy(darima_diff0_forecast, test_ts)
+darima_diff0_acc 
+
+darima_diff0_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 6. NNAR
+```{r}
+nnar_forecast <- fit_nnar %>% forecast(test_ts)
+nnar_acc <- fabletools::accuracy(nnar_forecast, test_ts)
+nnar_acc 
+
+nnar_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+## 7. Prophet
+```{r}
+prophet_forecast <- fit_prophet %>% forecast(test_ts)
+prophet_acc <- fabletools::accuracy(prophet_forecast, test_ts)
+prophet_acc 
+
+prophet_forecast %>%
+   autoplot(combined_tsibble)
+```
+
+After evaluation of those models, we found that Prophet has the best performance among them.
+
+# IV. Tune prophet model
+```{r}
+fit_multi_prophet <- train_ts_imputed %>% 
+  model(
+    prophet_all = prophet(Mean_temp ~ Mean_pressure + Humidity + Wind_speed+
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_no_pred = prophet(Mean_temp ~
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_humi = prophet(Mean_temp ~ Humidity +
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_wind = prophet(Mean_temp ~ Wind_speed +
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)), 
+    prophet_pressure = prophet(Mean_temp ~ Mean_pressure +
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_h_w = prophet(Mean_temp ~ Humidity + Wind_speed+
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_h_p = prophet(Mean_temp ~ Humidity + Mean_pressure+
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+    prophet_w_p = prophet(Mean_temp ~ Wind_speed + Mean_pressure+
+                      season(period = "week", order = 10) +
+                      season(period = "year", order = 5)),
+  )
+```
+
+Evaluate:
+```{r}
+multi_prophet_forecast <- fit_multi_prophet %>% forecast(test_ts)
+multi_prophet_acc <- multi_prophet_forecast %>% fabletools::accuracy(test_ts)
+multi_prophet_acc
+```
+
+Model prophet_w_p has the best performance with a value of RMSE is equal to 2.29.
+
+Plot:
+```{r}
+w_p_row_number <- which(multi_prophet_forecast$.model == 'prophet_w_p')
+multi_prophet_forecast[w_p_row_number,] %>% fabletools::accuracy(test_ts)
+multi_prophet_forecast[w_p_row_number,] %>%
+  autoplot(combined_tsibble)
+```
+
+# V. Results
+## 1. All models
+```{r}
+# for final result recording
+final_accs <- tslm_acc
+final_accs <- rbind(final_accs, mean_acc)
+final_accs <- rbind(final_accs, naive_acc)
+final_accs <- rbind(final_accs, snaive_acc)
+final_accs <- rbind(final_accs, drift_acc)
+final_accs <- rbind(final_accs, arima_acc)
+final_accs <- rbind(final_accs, arima_no_cons_acc)
+final_accs <- rbind(final_accs, ewma_acc)
+final_accs <- rbind(final_accs, darima_acc)
+final_accs <- rbind(final_accs, darima_diff0_acc)
+final_accs <- rbind(final_accs, nnar_acc)
+final_accs <- rbind(final_accs, prophet_acc)
+
+rs_dir <- "result"
+if (!dir.exists(rs_dir)) {
+  dir.create(rs_dir)
+  cat("Directory created:", rs_dir, "\n")
+} else {
+  cat("Directory already exists:", rs_dir, "\n")
+}
+
+rs_file_path <- "result/all_model_accs.csv"
+write.csv(final_accs, 
+          file = rs_file_path, 
+          row.names = FALSE)
+```
+
+## 2. Fine tune prophet models
+```{r}
+prophet_file_path <- "result/prophet_fine_tune.csv"
+write.csv(multi_prophet_acc, 
+          file = prophet_file_path,
+          row.names = FALSE)
+```
