@@ -520,10 +520,10 @@ nnar_forecast %>%
 ```{r}
 prophet_forecast <- fit_prophet %>% forecast(test_ts)
 prophet_acc <- fabletools::accuracy(prophet_forecast, test_ts)
-prophet_acc 
+prophet_acc
 
-prophet_forecast %>%
-   autoplot(combined_tsibble)
+autoplot(combined_tsibble, color = "violet") +
+  autolayer(prophet_forecast, color = "blue")
 ```
 
 After evaluation of those models, we found that Prophet has the best performance among them.
@@ -572,8 +572,10 @@ Plot:
 ```{r}
 w_p_row_number <- which(multi_prophet_forecast$.model == 'prophet_w_p')
 multi_prophet_forecast[w_p_row_number,] %>% fabletools::accuracy(test_ts)
-multi_prophet_forecast[w_p_row_number,] %>%
-  autoplot(combined_tsibble)
+
+autoplot(combined_tsibble, color = "violet") +
+  autolayer(multi_prophet_forecast[w_p_row_number,], 
+            color = "blue")
 ```
 
 # V. Results
